@@ -147,14 +147,20 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 
     if (x < w && y < h) {
 		// Lambert
-		glm::vec3 light = -glm::normalize(glm::vec3(1,2,3));
-		glm::vec3 intensity(1.f);
-		glm::vec3 col = fragmentBuffer[index].color * intensity * glm::dot(fragmentBuffer[index].eyeNor, light);
+		glm::vec3 lightPos(10.f, 20.f, 30.f);
+		glm::vec3 lightWi = glm::normalize(fragmentBuffer[index].eyePos - lightPos);
+		glm::vec3 intensity(1.5f);
 
-        //framebuffer[index] = fragmentBuffer[index].color;
+		float absDot = glm::abs(glm::dot(fragmentBuffer[index].eyeNor, lightWi));
+		glm::vec3 col = fragmentBuffer[index].color * intensity * absDot;
+
 		framebuffer[index] = glm::clamp(col, 0.f, 1.f);
 
-		// TODO: add your fragment shader code here
+        //framebuffer[index] = fragmentBuffer[index].color;
+		//framebuffer[index] = glm::clamp(col, 0.f, 1.f);
+		//framebuffer[index] = col;
+
+		//// TODO: add your fragment shader code here
 
     }
 }
@@ -660,6 +666,7 @@ void _vertexTransformAndAssembly(
 		glm::vec4 p = pClip;
 		p.x = ((pClip.x + 1.f) / 2.f) * (float)width;
 		p.y = ((1.f - pClip.y) / 2.f) * (float)height;
+		p.z = (-(pClip.z + 1.f) / 2.f);
 
 		// World space to camera space
 		glm::vec3 pEye(MV * pWorld);
@@ -716,43 +723,15 @@ void _rasterize(int numPrims, int width, int height,
 		triPos[1] = glm::vec3(prim.v[1].pos);
 		triPos[2] = glm::vec3(prim.v[2].pos);
 
-		//triPos[0].x /= triPos[0].z;
-		//triPos[1].x /= triPos[1].z;
-		//triPos[2].x /= triPos[2].z;
-
-		//triPos[0].y /= triPos[0].z;
-		//triPos[1].y /= triPos[1].z;
-		//triPos[2].y /= triPos[2].z;
-
 		glm::vec3 triEyePos[3];
 		triEyePos[0] = prim.v[0].eyePos;
 		triEyePos[1] = prim.v[1].eyePos;
 		triEyePos[2] = prim.v[2].eyePos;
 
-		/*triEyePos[0].x /= triEyePos[0].z;
-		triEyePos[1].x /= triEyePos[1].z;
-		triEyePos[2].x /= triEyePos[2].z;
-
-		triEyePos[0].y /= triEyePos[0].z;
-		triEyePos[1].y /= triEyePos[1].z;
-		triEyePos[2].y /= triEyePos[2].z;*/
-
 		glm::vec3 triEyeNor[3];
 		triEyeNor[0] = prim.v[0].eyeNor;
 		triEyeNor[1] = prim.v[1].eyeNor;
 		triEyeNor[2] = prim.v[2].eyeNor;
-
-		/*triEyeNor[0].x /= triEyeNor[0].z;
-		triEyeNor[1].x /= triEyeNor[1].z;
-		triEyeNor[2].x /= triEyeNor[2].z;
-
-		triEyeNor[0].y /= triEyeNor[0].z;
-		triEyeNor[1].y /= triEyeNor[1].z;
-		triEyeNor[2].y /= triEyeNor[2].z;*/
-
-		//triPos[0].z = 1 / triPos[0].z;
-		//triPos[1].z = 1 / triPos[1].z;
-		//triPos[2].z = 1 / triPos[2].z;
 
 		// Get bounding box for the primitive
 		AABB triBB = getAABBForTriangle(triPos);
@@ -768,7 +747,7 @@ void _rasterize(int numPrims, int width, int height,
 					int index = i + (j * width);
 
 					// Get the z coordinate and scale by some factor
-					int depth = getZAtCoordinate(p, triPos) * 10000;
+					int depth = getZAtCoordinate(p, triPos) * INT_MAX;
 					// Store the resulting minimum depth at dev_depth[index]
 					atomicMin(&dev_depth[index], depth);
 					
