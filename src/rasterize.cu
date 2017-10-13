@@ -775,6 +775,12 @@ void _rasterize(int numPrims, int width, int height,
 		triEyeNor[1] = prim.v[1].eyeNor;
 		triEyeNor[2] = prim.v[2].eyeNor;
 
+		// https://en.wikipedia.org/wiki/Back-face_culling
+		// EXCEPT DOING >= DOES FRONT FACE CULLING?!?!?!
+		if (glm::dot(-triEyePos[0], triEyeNor[0]) <= 0.f) {
+			return;
+		}
+
 		// Get bounding box for the primitive
 		AABB triBB = getAABBForTriangle(triPos);
 
