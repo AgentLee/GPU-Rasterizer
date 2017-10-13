@@ -54,10 +54,6 @@ namespace {
 	struct Primitive {
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
-
-		TextureData *dev_diffuseTex = NULL;
-		int diffuseTexWidth;
-		int diffuseTexHeight;
 	};
 
 	struct Fragment {
@@ -142,6 +138,31 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
     }
 }
 
+// https://en.wikipedia.org/wiki/Bilinear_filtering
+__device__ __host__
+glm::vec3 bilinear(TextureData *tex, glm::vec2 uv, int width, int height)
+{
+	float u = uv.x * width - 0.5f;
+	float v = uv.y * height - 0.5f;
+
+	float uRatio = u - (float)glm::floor(u);
+	float vRatio = v - (float)glm::floor(v);
+
+	float uOpposite = 1.f - uRatio;
+	float vOpposite = 1.f - vRatio;
+
+	int index1 = 3 * (uv.x + (uv.y * width));
+	int index2 = 3 * ((uv.x + 1) + (uv.y * width));
+	int index3 = 3 * (uv.x + ((uv.y + 1) * width));
+	int index4 = 3 * ((uv.x + 1) + ((uv.y + 1) * width));
+
+	float r = (tex[index1] * uOpposite + tex[index2] * uRatio) * vOpposite + (tex[index3] * uOpposite + tex[index4] * uRatio) * vRatio;
+	float g = (tex[index1 + 1] * uOpposite + tex[index2 + 1] * uRatio) * vOpposite + (tex[index3 + 1] * uOpposite + tex[index4 + 1] * uRatio) * vRatio;
+	float b = (tex[index1 + 2] * uOpposite + tex[index2 + 2] * uRatio) * vOpposite + (tex[index3 + 2] * uOpposite + tex[index4 + 2] * uRatio) * vRatio;
+
+	return glm::vec3(r,g,b);
+}
+
 /** 
 * Writes fragment colors to the framebuffer
 */
@@ -170,15 +191,19 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 		}
 		// Use texture
 		else {
-			int u = fragmentBuffer[index].texcoord0.x * fragmentBuffer[index].diffuseTexWidth;
-			int v = fragmentBuffer[index].texcoord0.y * fragmentBuffer[index].diffuseTexHeight;
+			// Bilinear...need to fix
+			framebuffer[index] = bilinear(fragmentBuffer[index].dev_diffuseTex, fragmentBuffer[index].texcoord0, fragmentBuffer[index].diffuseTexWidth, fragmentBuffer[index].diffuseTexHeight);
 
-			// https://stackoverflow.com/questions/35005603/get-color-of-the-texture-at-uv-coordinate
-			int uvIndex = 3 * (u + (v * fragmentBuffer[index].diffuseTexWidth));
-			// https://www.opengl.org/discussion_boards/showthread.php/170651-Is-it-possible-to-get-the-pixel-color
-			framebuffer[index] = glm::vec3(	fragmentBuffer[index].dev_diffuseTex[uvIndex] / 255.f,
-											fragmentBuffer[index].dev_diffuseTex[uvIndex + 1] / 255.f,
-											fragmentBuffer[index].dev_diffuseTex[uvIndex + 2] / 255.f);
+			// Not bilinear
+			//int u = fragmentBuffer[index].texcoord0.x * fragmentBuffer[index].diffuseTexWidth;
+			//int v = fragmentBuffer[index].texcoord0.y * fragmentBuffer[index].diffuseTexHeight;
+
+			//// https://stackoverflow.com/questions/35005603/get-color-of-the-texture-at-uv-coordinate
+			//int uvIndex = 3 * (u + (v * fragmentBuffer[index].diffuseTexWidth));
+			//// https://www.opengl.org/discussion_boards/showthread.php/170651-Is-it-possible-to-get-the-pixel-color
+			//framebuffer[index] = glm::vec3(	fragmentBuffer[index].dev_diffuseTex[uvIndex] / 255.f,
+			//								fragmentBuffer[index].dev_diffuseTex[uvIndex + 1] / 255.f,
+			//								fragmentBuffer[index].dev_diffuseTex[uvIndex + 2] / 255.f);
 		}
 		// TODO: add your fragment shader code here
     }
@@ -730,6 +755,9 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 			pid = iid / (int)primitive.primitiveType;
 			dev_primitives[pid + curPrimitiveBeginId].v[iid % (int)primitive.primitiveType]
 				= primitive.dev_verticesOut[primitive.dev_indices[iid]];
+		} 
+		else if (primitive.primitiveMode == TINYGLTF_MODE_POINTS) {
+			
 		}
 
 		// TODO: other primitive types (point, line)
@@ -776,8 +804,7 @@ void _rasterize(int numPrims, int width, int height,
 		triEyeNor[2] = prim.v[2].eyeNor;
 
 		// https://en.wikipedia.org/wiki/Back-face_culling
-		// EXCEPT DOING >= DOES FRONT FACE CULLING?!?!?!
-		if (glm::dot(-triEyePos[0], triEyeNor[0]) <= 0.f) {
+		if (glm::dot(triEyePos[0], triEyeNor[0]) >= 0.f) {
 			return;
 		}
 
@@ -785,76 +812,59 @@ void _rasterize(int numPrims, int width, int height,
 		AABB triBB = getAABBForTriangle(triPos);
 
 #if DRAWPOINTS
-			for (int i = 0; i < 3; i++) {
-				int x = triPos[i].x;
-				int y = triPos[i].y;
+		for (int i = 0; i < 3; i++) {
+			int x = triPos[i].x;
+			int y = triPos[i].y;
 
-				int index = x + (y * width);
-				dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
-			}
+			int index = x + (y * width);
+			dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
+		}
 #else 
-			for (int i = triBB.min.x; i < triBB.max.x; i++) {
-				for (int j = triBB.min.y; j < triBB.max.y; j++) {
-					// Get the barycentric coordinate 
-					glm::vec2 pixel(i, j);
-					glm::vec3 p = calculateBarycentricCoordinate(triPos, pixel);
+		for (int i = triBB.min.x; i < triBB.max.x; i++) {
+			for (int j = triBB.min.y; j < triBB.max.y; j++) {
+				// Get the barycentric coordinate 
+				glm::vec2 pixel(i, j);
+				glm::vec3 p = calculateBarycentricCoordinate(triPos, pixel);
 
-					// Check to see if the point is in the triangle
-					if (isBarycentricCoordInBounds(p)) {
-						int index = i + (j * width);
+				// Check to see if the point is in the triangle
+				if (isBarycentricCoordInBounds(p)) {
+					int index = i + (j * width);
 
-						// Get the z coordinate and scale by some factor
-						int depth = getZAtCoordinate(p, triPos) * INT_MAX;
+					// Get the z coordinate and scale by some factor
+					int depth = getZAtCoordinate(p, triPos) * INT_MAX;
 
-						// Correct Perspective Projection
-						//float invZ = (p.x / triPos[0].z) + (p.y / triPos[1].z) + (p.z / triPos[2].z);
-						//invZ = 1.f / invZ;
-						//depth = invZ * INT_MAX;
+					// Store the resulting minimum depth at dev_depth[index]
+					atomicMin(&dev_depth[index], depth);
 
-						// Store the resulting minimum depth at dev_depth[index]
-						atomicMin(&dev_depth[index], depth);
+					// Need to check if the the current depth is the closest one
+					if (dev_depth[index] == depth) {
+						// Color point if in bounds
+						dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
+						dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
+						dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
 
-						// Need to check if the the current depth is the closest one
-						if (dev_depth[index] == depth) {
-							//glm::vec3 eyeNor((triEyeNor[0] * p.x / triPos[0].z) +
-							//				(triEyeNor[1] * p.y / triPos[1].z) +
-							//				(triEyeNor[2] * p.z / triPos[2].z));
-							//eyeNor *= depth;
+						// Texture stuff
+						dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
+						dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
+						dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
 
-							//glm::vec3 eyePos((triEyePos[0] * p.x / triPos[0].z) +
-							//				(triEyePos[1] * p.y / triPos[1].z) +
-							//				(triEyePos[2] * p.z / triPos[2].z));
-							//eyePos *= depth;
-
-							// Color point if in bounds
-							dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
-							dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
-							dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
-							/*dev_fragmentBuffer[index].eyePos = eyePos;
-							dev_fragmentBuffer[index].eyeNor = eyeNor;*/
-
-							// Texture stuff
-							dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
-							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
-							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
-
-							// Perspective Correct 
-							// Divide all attributes (in this case barycentric) by eye space z
-							// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
-							glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
+						// Perspective Correct Texture Coordinate
+						// Divide all attributes (in this case barycentric) by eye space z
+						// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
+						glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
 							
-							float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
-							float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
+						float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
+						float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
 
-							float z = 1.f / (w.x + w.y + w.z);
-							s *= z;
-							t *= z;
+						float z = 1.f / (w.x + w.y + w.z);
+						s *= z;
+						t *= z;
 
-							dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
-						}
+						dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
 					}
 				}
 			}
+		}
 #endif
 	}
 }
