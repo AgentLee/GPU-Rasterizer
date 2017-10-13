@@ -837,7 +837,13 @@ void _rasterize(int numPrims, int width, int height,
 							dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
 							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
 							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
-							dev_fragmentBuffer[index].texcoord0 = p.x * prim.v[0].texcoord0 + p.y * prim.v[1].texcoord0 + p.z * prim.v[2].texcoord0;
+
+							//dev_fragmentBuffer[index].texcoord0 = (p.x * prim.v[0].texcoord0 + p.y *prim.v[1].texcoord0 + p.z * prim.v[2].texcoord0);
+
+							float invZ = 1.f / (p.x / triPos[0].z + p.y / triPos[1].z + p.z / triPos[2].z);
+							dev_fragmentBuffer[index].texcoord0 = invZ * glm::vec2(p.x * prim.v[0].texcoord0 / triPos[0].z +
+								p.y * prim.v[1].texcoord0 / triPos[1].z +
+								p.z * prim.v[2].texcoord0 / triPos[2].z);
 						}
 					}
 				}
