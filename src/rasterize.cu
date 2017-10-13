@@ -838,12 +838,19 @@ void _rasterize(int numPrims, int width, int height,
 							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
 							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
 
-							//dev_fragmentBuffer[index].texcoord0 = (p.x * prim.v[0].texcoord0 + p.y *prim.v[1].texcoord0 + p.z * prim.v[2].texcoord0);
+							// Perspective Correct 
+							// Divide all attributes (in this case barycentric) by eye space z
+							// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
+							glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
+							
+							float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
+							float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
 
-							float invZ = 1.f / (p.x / triPos[0].z + p.y / triPos[1].z + p.z / triPos[2].z);
-							dev_fragmentBuffer[index].texcoord0 = invZ * glm::vec2(p.x * prim.v[0].texcoord0 / triPos[0].z +
-								p.y * prim.v[1].texcoord0 / triPos[1].z +
-								p.z * prim.v[2].texcoord0 / triPos[2].z);
+							float z = 1.f / (w.x + w.y + w.z);
+							s *= z;
+							t *= z;
+
+							dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
 						}
 					}
 				}
