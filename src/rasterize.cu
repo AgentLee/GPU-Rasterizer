@@ -29,9 +29,9 @@ namespace {
 	typedef unsigned char BufferByte;
 
 	enum PrimitiveType{
-		Point = 1,
-		Line = 2,
-		Triangle = 3
+		Point		= 1,
+		Line		= 2,
+		Triangle	= 3
 	};
 
 	// Assembled and transformed vertices
@@ -44,16 +44,20 @@ namespace {
 
 		 glm::vec3 eyePos;	// eye space position used for shading
 		 glm::vec3 eyeNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
-		 //glm::vec3 col;
+		 glm::vec3 col;
 		 glm::vec2 texcoord0;
 		 TextureData* dev_diffuseTex = NULL;
-		// int texWidth, texHeight;
+		 int texWidth, texHeight;
 		// ...
 	};
 
 	struct Primitive {
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
+
+		TextureData *dev_diffuseTex = NULL;
+		int diffuseTexWidth;
+		int diffuseTexHeight;
 	};
 
 	struct Fragment {
@@ -65,8 +69,10 @@ namespace {
 
 		 glm::vec3 eyePos;	// eye space position used for shading
 		 glm::vec3 eyeNor;
-		// VertexAttributeTexcoord texcoord0;
-		// TextureData* dev_diffuseTex;
+		 VertexAttributeTexcoord texcoord0;
+		 TextureData* dev_diffuseTex;
+		 int diffuseTexWidth;
+		 int diffuseTexHeight;
 		// ...
 	};
 
@@ -146,22 +152,35 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
     int index = x + (y * w);
 
     if (x < w && y < h) {
-		// Lambert
 		glm::vec3 lightPos(10.f, 20.f, 30.f);
-		glm::vec3 lightWi = glm::normalize(fragmentBuffer[index].eyePos - lightPos);
 		glm::vec3 intensity(1.5f);
 
-		float absDot = glm::abs(glm::dot(fragmentBuffer[index].eyeNor, lightWi));
-		glm::vec3 col = fragmentBuffer[index].color * intensity * absDot;
+		// Use Lambert
+		if (fragmentBuffer[index].dev_diffuseTex == NULL) {
+			glm::vec3 lightWi = glm::normalize(fragmentBuffer[index].eyePos - lightPos);
 
-		framebuffer[index] = glm::clamp(col, 0.f, 1.f);
+			float absDot = glm::abs(glm::dot(fragmentBuffer[index].eyeNor, lightWi));
+			glm::vec3 col = fragmentBuffer[index].color * intensity * absDot;
 
-        //framebuffer[index] = fragmentBuffer[index].color;
-		//framebuffer[index] = glm::clamp(col, 0.f, 1.f);
-		//framebuffer[index] = col;
+			framebuffer[index] = glm::clamp(col, 0.f, 1.f);
 
-		//// TODO: add your fragment shader code here
+			//framebuffer[index] = fragmentBuffer[index].color;
+			//framebuffer[index] = glm::clamp(col, 0.f, 1.f);
+			//framebuffer[index] = col;
+		}
+		// Use texture
+		else {
+			int u = fragmentBuffer[index].texcoord0.x * fragmentBuffer[index].diffuseTexWidth;
+			int v = fragmentBuffer[index].texcoord0.y * fragmentBuffer[index].diffuseTexHeight;
 
+			// https://stackoverflow.com/questions/35005603/get-color-of-the-texture-at-uv-coordinate
+			int uvIndex = 3 * (u + (v * fragmentBuffer[index].diffuseTexWidth));
+			// https://www.opengl.org/discussion_boards/showthread.php/170651-Is-it-possible-to-get-the-pixel-color
+			framebuffer[index] = glm::vec3(	fragmentBuffer[index].dev_diffuseTex[uvIndex] / 255.f,
+											fragmentBuffer[index].dev_diffuseTex[uvIndex + 1] / 255.f,
+											fragmentBuffer[index].dev_diffuseTex[uvIndex + 2] / 255.f);
+		}
+		// TODO: add your fragment shader code here
     }
 }
 
@@ -632,8 +651,6 @@ void rasterizeSetBuffers(const tinygltf::Scene & scene) {
 
 		checkCUDAError("Free BufferView Device Mem");
 	}
-
-
 }
 
 
@@ -643,7 +660,8 @@ void _vertexTransformAndAssembly(
 	int numVertices, 
 	PrimitiveDevBufPointers primitive, 
 	glm::mat4 MVP, glm::mat4 MV, glm::mat3 MV_normal, 
-	int width, int height) {
+	int width, int height) 
+{
 
 	// vertex id
 	int vid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -654,30 +672,42 @@ void _vertexTransformAndAssembly(
 		// Then divide the pos by its w element to transform into NDC space
 		// Finally transform x and y to viewport space
 
+		// World coordinates
 		glm::vec4 pWorld(primitive.dev_position[vid], 1.f);
 		glm::vec3 norWorld(primitive.dev_normal[vid]);
-		
+
 		// Take point to homogenous coordinates/clip space
 		glm::vec4 pClip = MVP * pWorld;
 		// Take point to NDC
 		pClip /= pClip.w;
 
 		// Take point to screen space
-		glm::vec4 p = pClip;
-		p.x = ((pClip.x + 1.f) / 2.f) * (float)width;
-		p.y = ((1.f - pClip.y) / 2.f) * (float)height;
-		p.z = (-(pClip.z + 1.f) / 2.f);
+		glm::vec4 pScreen(pClip);
+		pScreen.x = ((pClip.x + 1.f) / 2.f) * (float)width;
+		pScreen.y = ((1.f - pClip.y) / 2.f) * (float)height;
+		pScreen.z = (-(pClip.z + 1.f) / 2.f);
 
-		// World space to camera space
+		// Get the point's position in camera space
 		glm::vec3 pEye(MV * pWorld);
-		glm::vec3 pNor(glm::normalize(MV_normal * norWorld));
+		glm::vec3 norEye(glm::normalize(MV_normal * norWorld));
 
 		// TODO: Apply vertex assembly here
 		// Assemble all attribute arraies into the primitive array
-		
-		primitive.dev_verticesOut[vid].pos = p;
+
+		primitive.dev_verticesOut[vid].pos = pScreen;
 		primitive.dev_verticesOut[vid].eyePos = pEye;
-		primitive.dev_verticesOut[vid].eyeNor = pNor;
+		primitive.dev_verticesOut[vid].eyeNor = norEye;
+
+		// Texture stuff
+		if (primitive.dev_diffuseTex == NULL) {
+			primitive.dev_verticesOut[vid].dev_diffuseTex = NULL;
+		}
+		else {
+			primitive.dev_verticesOut[vid].texcoord0 = primitive.dev_texcoord0[vid];
+			primitive.dev_verticesOut[vid].dev_diffuseTex = primitive.dev_diffuseTex;
+			primitive.dev_verticesOut[vid].texWidth = primitive.diffuseTexWidth;
+			primitive.dev_verticesOut[vid].texHeight = primitive.diffuseTexHeight;
+		}
 	}
 }
 
@@ -705,6 +735,18 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 		// TODO: other primitive types (point, line)
 	}
 	
+}
+
+#define DRAWLINES 0
+#define DRAWPOINTS 0
+
+// https://gamedevelopment.tutsplus.com/tutorials/lets-build-a-3d-graphics-engine-rasterizing-line-segments-and-circles--gamedev-8414
+__global__
+void _rasterizeLine(int width, int height,
+	Fragment *dev_fragmentBuffer,
+	glm::vec3 &p1, glm::vec3 &p2)
+{
+	//float dx = 
 }
 
 __global__ 
@@ -736,34 +778,69 @@ void _rasterize(int numPrims, int width, int height,
 		// Get bounding box for the primitive
 		AABB triBB = getAABBForTriangle(triPos);
 
-		for (int i = triBB.min.x; i <= triBB.max.x; i++) {
-			for (int j = triBB.min.y; j <= triBB.max.y; j++) {
-				glm::vec2 pixel(i, j);
-				// Get the barycentric coordinate 
-				glm::vec3 p = calculateBarycentricCoordinate(triPos, pixel);
-				
-				// Check to see if the point is in the triangle
-				if (isBarycentricCoordInBounds(p)) {
-					int index = i + (j * width);
+#if DRAWPOINTS
+			for (int i = 0; i < 3; i++) {
+				int x = triPos[i].x;
+				int y = triPos[i].y;
 
-					// Get the z coordinate and scale by some factor
-					int depth = getZAtCoordinate(p, triPos) * INT_MAX;
-					// Store the resulting minimum depth at dev_depth[index]
-					atomicMin(&dev_depth[index], depth);
-					
-					// Need to check if the the current depth is the closest one
-					if (dev_depth[index] == depth) {
-						// Color point if in bounds
-						dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
-						//dev_fragmentBuffer[index].color = glm::vec3(-dev_depth[index] / (float)10000);
-						dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
-						dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
+				int index = x + (y * width);
+				dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
+			}
+#else 
+			for (int i = triBB.min.x; i < triBB.max.x; i++) {
+				for (int j = triBB.min.y; j < triBB.max.y; j++) {
+					// Get the barycentric coordinate 
+					glm::vec2 pixel(i, j);
+					glm::vec3 p = calculateBarycentricCoordinate(triPos, pixel);
+
+					// Check to see if the point is in the triangle
+					if (isBarycentricCoordInBounds(p)) {
+						int index = i + (j * width);
+
+						// Get the z coordinate and scale by some factor
+						int depth = getZAtCoordinate(p, triPos) * INT_MAX;
+
+						// Correct Perspective Projection
+						//float invZ = (p.x / triPos[0].z) + (p.y / triPos[1].z) + (p.z / triPos[2].z);
+						//invZ = 1.f / invZ;
+						//depth = invZ * INT_MAX;
+
+						// Store the resulting minimum depth at dev_depth[index]
+						atomicMin(&dev_depth[index], depth);
+
+						// Need to check if the the current depth is the closest one
+						if (dev_depth[index] == depth) {
+							//glm::vec3 eyeNor((triEyeNor[0] * p.x / triPos[0].z) +
+							//				(triEyeNor[1] * p.y / triPos[1].z) +
+							//				(triEyeNor[2] * p.z / triPos[2].z));
+							//eyeNor *= depth;
+
+							//glm::vec3 eyePos((triEyePos[0] * p.x / triPos[0].z) +
+							//				(triEyePos[1] * p.y / triPos[1].z) +
+							//				(triEyePos[2] * p.z / triPos[2].z));
+							//eyePos *= depth;
+
+							// Color point if in bounds
+							dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
+							dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
+							dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
+							/*dev_fragmentBuffer[index].eyePos = eyePos;
+							dev_fragmentBuffer[index].eyeNor = eyeNor;*/
+
+							// Texture stuff
+							dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
+							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
+							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
+							dev_fragmentBuffer[index].texcoord0 = p.x * prim.v[0].texcoord0 + p.y * prim.v[1].texcoord0 + p.z * prim.v[2].texcoord0;
+						}
 					}
 				}
 			}
-		}
+#endif
 	}
 }
+
+
 
 /**
  * Perform rasterization.
