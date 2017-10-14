@@ -191,19 +191,62 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 		}
 		// Use texture
 		else {
-			// Bilinear...need to fix
-			framebuffer[index] = bilinear(fragmentBuffer[index].dev_diffuseTex, fragmentBuffer[index].texcoord0, fragmentBuffer[index].diffuseTexWidth, fragmentBuffer[index].diffuseTexHeight);
+			glm::vec3 color(0.f);
 
-			// Not bilinear
-			//int u = fragmentBuffer[index].texcoord0.x * fragmentBuffer[index].diffuseTexWidth;
-			//int v = fragmentBuffer[index].texcoord0.y * fragmentBuffer[index].diffuseTexHeight;
+#define BILINEAR false
+			if (BILINEAR) {
+				// Bilinear
+				TextureData* tex = fragmentBuffer[index].dev_diffuseTex;
+				int width = fragmentBuffer[index].diffuseTexWidth;
+				int height = fragmentBuffer[index].diffuseTexHeight;
 
-			//// https://stackoverflow.com/questions/35005603/get-color-of-the-texture-at-uv-coordinate
-			//int uvIndex = 3 * (u + (v * fragmentBuffer[index].diffuseTexWidth));
-			//// https://www.opengl.org/discussion_boards/showthread.php/170651-Is-it-possible-to-get-the-pixel-color
-			//framebuffer[index] = glm::vec3(	fragmentBuffer[index].dev_diffuseTex[uvIndex] / 255.f,
-			//								fragmentBuffer[index].dev_diffuseTex[uvIndex + 1] / 255.f,
-			//								fragmentBuffer[index].dev_diffuseTex[uvIndex + 2] / 255.f);
+				float u = fragmentBuffer[index].texcoord0.x * width;
+				float v = fragmentBuffer[index].texcoord0.y * height;
+
+				int x = glm::floor(u);
+				int y = glm::floor(v);
+
+				float uRatio = u - x;
+				float vRatio = v - y;
+
+				float uOpposite = 1.f - uRatio;
+				float vOpposite = 1.f - vRatio;
+
+				int uvIndex1 = 3 * (x + y * width);
+				int uvIndex2 = 3 * (x + 1 + y * width);
+				int uvIndex3 = 3 * (x + (y + 1) * width);
+				int uvIndex4 = 3 * (x + 1 + (y + 1) * width);
+
+				float r = (tex[uvIndex1] * uOpposite + tex[uvIndex2] * uRatio) * vOpposite +
+					(tex[uvIndex3] * uOpposite + tex[uvIndex4] * uRatio) * vRatio;
+				float g = (tex[uvIndex1 + 1] * uOpposite + tex[uvIndex2 + 1] * uRatio) * vOpposite +
+					(tex[uvIndex3 + 1] * uOpposite + tex[uvIndex4 + 1] * uRatio) * vRatio;
+				float b = (tex[uvIndex1 + 2] * uOpposite + tex[uvIndex2 + 2] * uRatio) * vOpposite +
+					(tex[uvIndex3 + 2] * uOpposite + tex[uvIndex4 + 2] * uRatio) * vRatio;
+
+				color = glm::vec3(r, g, b);
+				color /= 255.f;
+
+				framebuffer[index] = color;
+			}
+			else {
+				// Not bilinear
+				int u = fragmentBuffer[index].texcoord0.x * fragmentBuffer[index].diffuseTexWidth;
+				int v = fragmentBuffer[index].texcoord0.y * fragmentBuffer[index].diffuseTexHeight;
+
+				// https://stackoverflow.com/questions/35005603/get-color-of-the-texture-at-uv-coordinate
+				int uvIndex = 3 * (u + (v * fragmentBuffer[index].diffuseTexWidth));
+
+				// https://www.opengl.org/discussion_boards/showthread.php/170651-Is-it-possible-to-get-the-pixel-color
+				float r = fragmentBuffer[index].dev_diffuseTex[uvIndex];
+				float g = fragmentBuffer[index].dev_diffuseTex[uvIndex + 1];
+				float b = fragmentBuffer[index].dev_diffuseTex[uvIndex + 2];
+
+				color = glm::vec3(r, g, b);
+				color /= 255.f;
+
+				framebuffer[index] = color;
+			}
 		}
 		// TODO: add your fragment shader code here
     }
