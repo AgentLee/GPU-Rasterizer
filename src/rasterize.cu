@@ -17,9 +17,13 @@
 #include "rasterize.h"
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <thrust/execution_policy.h>
+#include <thrust/random.h>
+#include <thrust/remove.h>
+#include <thrust/partition.h>
 
-#define BACKFACE_CULLING 0
-#define DRAWLINES 1
+#define BACKFACE_CULLING 1
+#define DRAWLINES 0
 #define DRAWPOINTS 0
 
 namespace {
@@ -119,6 +123,7 @@ static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 
 static int * dev_depth = NULL;	// you might need this buffer when doing depth test
+static int * dev_mutex = NULL;
 
 /**
  * Kernel that writes the image to the OpenGL PBO directly.
@@ -253,6 +258,10 @@ void rasterizeInit(int w, int h) {
     
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
+
+	cudaFree(dev_mutex);
+	cudaMalloc(&dev_mutex, width * height * sizeof(int));
+	cudaMemset(&dev_mutex, 0, width * height * sizeof(int));
 
 	checkCUDAError("rasterizeInit");
 }
@@ -795,19 +804,69 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 }
 
 // http://groups.csail.mit.edu/graphics/classes/6.837/F02/lectures/6.837-7_Line.pdf
-__global__
+__device__
 void _rasterizeLine(int width, int height,
 	Fragment *dev_fragmentBuffer,
 	glm::vec3 &p1, glm::vec3 &p2)
 {
-	//float dx = 
+	int x1 = p1.x;
+	int x2 = p2.x;
+	int y1 = p1.y;
+	int y2 = p2.y;
+
+	int dx = x2 - x1;
+	int dy = y2 - y1;
+	float m = dy / dx;
+
+	for (int x = x1; x <= x2; x++) {
+		int y = y1 + (int)m * (x - x1);
+
+		int index = x + (y * width);
+		if (x <= width - 1 && x >= 0 && y <= height - 1 && height >= 0)
+			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
+	}
 }
+
+__device__
+void _rasterizePoints(int width, int height, glm::vec3 *triPos, Fragment *dev_fragmentBuffer)
+{
+	// Since we only need to draw the points
+	// we can just set a color for each of the 
+	// points on the triangle. 
+	// For whatever reason, I couldn't set the color during render()
+	for (int i = 0; i < 3; i++) {
+		int x = triPos[i].x;
+		int y = triPos[i].y;
+
+		int index = x + (y * width);
+		dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
+	}
+}
+
+struct cullPrim
+{
+	__host__ __device__
+	bool operator()(const Primitive &prim)
+	{
+		glm::vec3 triEyePos[3];
+		triEyePos[0] = prim.v[0].eyePos;
+		triEyePos[1] = prim.v[1].eyePos;
+		triEyePos[2] = prim.v[2].eyePos;
+
+		glm::vec3 triEyeNor[3];
+		triEyeNor[0] = prim.v[0].eyeNor;
+		triEyeNor[1] = prim.v[1].eyeNor;
+		triEyeNor[2] = prim.v[2].eyeNor;
+
+		return (glm::dot(triEyePos[0], triEyeNor[0]) >= 0.f);
+	}
+};
 
 __global__ 
 void _rasterize(int numPrims, int width, int height,
 				Primitive *dev_primitives, 
 				Fragment *dev_fragmentBuffer,
-				int *dev_depth)
+				int *dev_depth, int *dev_mutex)
 {
 	// Primitive ID
 	int pid = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -829,6 +888,12 @@ void _rasterize(int numPrims, int width, int height,
 		triEyeNor[1] = prim.v[1].eyeNor;
 		triEyeNor[2] = prim.v[2].eyeNor;
 
+		//int culledPrims = numPrims;
+		//if (BACKFACE_CULLING) {
+		//	Primitive *unculledPrims = thrust::partition(thrust::device, dev_primitives, dev_primitives + culledPrims, cullPrim());
+		//	culledPrims = unculledPrims - dev_primitives;
+		//}
+
 		// https://en.wikipedia.org/wiki/Back-face_culling
 		if (glm::dot(triEyePos[0], triEyeNor[0]) >= 0.f && BACKFACE_CULLING) {
 			return;
@@ -838,57 +903,14 @@ void _rasterize(int numPrims, int width, int height,
 		AABB triBB = getAABBForTriangle(triPos);
 
 #if DRAWPOINTS
-		// Since we only need to draw the points
-		// we can just set a color for each of the 
-		// points on the triangle. 
-		// For whatever reason, I couldn't set the color during render()
-		for (int i = 0; i < 3; i++) {
-			int x = triPos[i].x;
-			int y = triPos[i].y;
-
-			int index = x + (y * width);
-			dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
-		}
+		// Pass in triangle and draw each point
+		_rasterizePoints(width, height, triPos, dev_fragmentBuffer);
 #elif DRAWLINES
-		int x1 = triPos[0].x;
-		int x2 = triPos[1].x;
-		int x3 = triPos[2].x;
-		int y1 = triPos[0].y;
-		int y2 = triPos[1].y;
-		int y3 = triPos[2].y;
-		
-		int dx21 = x2 - x1;
-		int dy21 = y2 - y1;
-		float m21 = dy21 / dx21;
-
-		int dx32 = x3 - x2;
-		int dy32 = y3 - y2;
-		float m32 = dy32 / dx32;
-
-		int dx13 = x3 - x1;
-		int dy13 = y3 - y1;
-		float m13 = dy13 / dx13;
-
-		for (int x = x1; x <= x2; x++) {
-			int y = y1 + (int)m21 * (x - x1);
-
-			int index = x + (y * width);
-			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
-		}
-
-		for (int x = x2; x <= x3; x++) {
-			int y = y2 + (int)m32 * (x - x2);
-
-			int index = x + (y * width);
-			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
-		}
-
-		for (int x = x1; x <= x3; x++) {
-			int y = y1 + (int)m13 * (x - x1);
-
-			int index = x + (y * width);
-			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
-		}
+		// Pass in 2 points of a triangle and draw the line connecting them
+		_rasterizeLine(width, height, dev_fragmentBuffer, triPos[0], triPos[1]);
+		_rasterizeLine(width, height, dev_fragmentBuffer, triPos[1], triPos[2]);
+		_rasterizeLine(width, height, dev_fragmentBuffer, triPos[2], triPos[0]);
+// Triangles
 #else 
 		for (int i = triBB.min.x; i < triBB.max.x; i++) {
 			for (int j = triBB.min.y; j < triBB.max.y; j++) {
@@ -899,39 +921,49 @@ void _rasterize(int numPrims, int width, int height,
 				// Check to see if the point is in the triangle
 				if (isBarycentricCoordInBounds(p)) {
 					int index = i + (j * width);
+					
+					bool isLocked = false;
+					do
+					{
+						isLocked = (atomicCAS(&dev_mutex[index], 0, 1) == 0);
 
-					// Get the z coordinate and scale by some factor
-					int depth = getZAtCoordinate(p, triPos) * INT_MAX;
+						// Get the z coordinate and scale by some factor
+						int depth = getZAtCoordinate(p, triPos) * INT_MAX;
 
-					// Store the resulting minimum depth at dev_depth[index]
-					atomicMin(&dev_depth[index], depth);
+						// Store the resulting minimum depth at dev_depth[index]
+						atomicMin(&dev_depth[index], depth);
 
-					// Need to check if the the current depth is the closest one
-					if (dev_depth[index] == depth) {
-						// Color point if in bounds
-						dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
-						dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
-						dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
+						// Need to check if the the current depth is the closest one
+						if (dev_depth[index] == depth) {
+							// Color point if in bounds
+							dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
+							dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
+							dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
 
-						// Texture stuff
-						dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
-						dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
-						dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
+							// Texture stuff
+							dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
+							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
+							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
 
-						// Perspective Correct Texture Coordinate
-						// Divide all attributes (in this case barycentric) by eye space z
-						// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
-						glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
-							
-						float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
-						float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
+							// Perspective Correct Texture Coordinate
+							// Divide all attributes (in this case barycentric) by eye space z
+							// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
+							glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
 
-						float z = 1.f / (w.x + w.y + w.z);
-						s *= z;
-						t *= z;
+							float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
+							float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
 
-						dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
-					}
+							float z = 1.f / (w.x + w.y + w.z);
+							s *= z;
+							t *= z;
+
+							dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
+						}
+
+						if (isLocked) {
+							dev_mutex[index] = 0;
+						}
+					} while (!isLocked);
 				}
 			}
 		}
@@ -993,7 +1025,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	{
 		dim3 numThreadsPerBlock(128);
 		dim3 numBlocksForPrims((totalNumPrimitives + numThreadsPerBlock.x - 1) / numThreadsPerBlock.x);
-		_rasterize << < numBlocksForPrims, numThreadsPerBlock >> > (totalNumPrimitives, width, height, dev_primitives, dev_fragmentBuffer, dev_depth);
+		_rasterize << < numBlocksForPrims, numThreadsPerBlock >> > (totalNumPrimitives, width, height, dev_primitives, dev_fragmentBuffer, dev_depth, dev_mutex);
 		checkCUDAError("rasterization");
 	}
 	
@@ -1043,6 +1075,9 @@ void rasterizeFree() {
 
 	cudaFree(dev_depth);
 	dev_depth = NULL;
+
+	cudaFree(dev_mutex);
+	dev_mutex = NULL;
 
     checkCUDAError("rasterize Free");
 }
