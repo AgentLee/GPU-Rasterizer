@@ -18,6 +18,10 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#define BACKFACE_CULLING 0
+#define DRAWLINES 1
+#define DRAWPOINTS 0
+
 namespace {
 
 	typedef unsigned short VertexIndex;
@@ -28,7 +32,7 @@ namespace {
 
 	typedef unsigned char BufferByte;
 
-	enum PrimitiveType{
+	enum PrimitiveType {
 		Point		= 1,
 		Line		= 2,
 		Triangle	= 3
@@ -138,31 +142,6 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
     }
 }
 
-// https://en.wikipedia.org/wiki/Bilinear_filtering
-__device__ __host__
-glm::vec3 bilinear(TextureData *tex, glm::vec2 uv, int width, int height)
-{
-	float u = uv.x * width - 0.5f;
-	float v = uv.y * height - 0.5f;
-
-	float uRatio = u - (float)glm::floor(u);
-	float vRatio = v - (float)glm::floor(v);
-
-	float uOpposite = 1.f - uRatio;
-	float vOpposite = 1.f - vRatio;
-
-	int index1 = 3 * (uv.x + (uv.y * width));
-	int index2 = 3 * ((uv.x + 1) + (uv.y * width));
-	int index3 = 3 * (uv.x + ((uv.y + 1) * width));
-	int index4 = 3 * ((uv.x + 1) + ((uv.y + 1) * width));
-
-	float r = (tex[index1] * uOpposite + tex[index2] * uRatio) * vOpposite + (tex[index3] * uOpposite + tex[index4] * uRatio) * vRatio;
-	float g = (tex[index1 + 1] * uOpposite + tex[index2 + 1] * uRatio) * vOpposite + (tex[index3 + 1] * uOpposite + tex[index4 + 1] * uRatio) * vRatio;
-	float b = (tex[index1 + 2] * uOpposite + tex[index2 + 2] * uRatio) * vOpposite + (tex[index3 + 2] * uOpposite + tex[index4 + 2] * uRatio) * vRatio;
-
-	return glm::vec3(r,g,b);
-}
-
 /** 
 * Writes fragment colors to the framebuffer
 */
@@ -175,6 +154,12 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
     if (x < w && y < h) {
 		glm::vec3 lightPos(10.f, 20.f, 30.f);
 		glm::vec3 intensity(1.5f);
+
+		if (DRAWPOINTS || DRAWLINES) {
+			framebuffer[index] = fragmentBuffer[index].color;
+			return;
+		}
+
 
 		// Use Lambert
 		if (fragmentBuffer[index].dev_diffuseTex == NULL) {
@@ -193,7 +178,7 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 		else {
 			glm::vec3 color(0.f);
 
-#define BILINEAR false
+#define BILINEAR true
 			if (BILINEAR) {
 				// Bilinear
 				TextureData* tex = fragmentBuffer[index].dev_diffuseTex;
@@ -217,6 +202,7 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 				int uvIndex3 = 3 * (x + (y + 1) * width);
 				int uvIndex4 = 3 * (x + 1 + (y + 1) * width);
 
+				// https://en.wikipedia.org/wiki/Bilinear_filtering
 				float r = (tex[uvIndex1] * uOpposite + tex[uvIndex2] * uRatio) * vOpposite +
 					(tex[uvIndex3] * uOpposite + tex[uvIndex4] * uRatio) * vRatio;
 				float g = (tex[uvIndex1 + 1] * uOpposite + tex[uvIndex2 + 1] * uRatio) * vOpposite +
@@ -721,8 +707,6 @@ void rasterizeSetBuffers(const tinygltf::Scene & scene) {
 	}
 }
 
-
-
 __global__ 
 void _vertexTransformAndAssembly(
 	int numVertices, 
@@ -802,16 +786,15 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 		else if (primitive.primitiveMode == TINYGLTF_MODE_POINTS) {
 			
 		}
+		else if (primitive.primitiveMode == TINYGLTF_MODE_LINE) {
+			
+		}
 
 		// TODO: other primitive types (point, line)
 	}
-	
 }
 
-#define DRAWLINES 0
-#define DRAWPOINTS 0
-
-// https://gamedevelopment.tutsplus.com/tutorials/lets-build-a-3d-graphics-engine-rasterizing-line-segments-and-circles--gamedev-8414
+// http://groups.csail.mit.edu/graphics/classes/6.837/F02/lectures/6.837-7_Line.pdf
 __global__
 void _rasterizeLine(int width, int height,
 	Fragment *dev_fragmentBuffer,
@@ -847,7 +830,7 @@ void _rasterize(int numPrims, int width, int height,
 		triEyeNor[2] = prim.v[2].eyeNor;
 
 		// https://en.wikipedia.org/wiki/Back-face_culling
-		if (glm::dot(triEyePos[0], triEyeNor[0]) >= 0.f) {
+		if (glm::dot(triEyePos[0], triEyeNor[0]) >= 0.f && BACKFACE_CULLING) {
 			return;
 		}
 
@@ -855,12 +838,56 @@ void _rasterize(int numPrims, int width, int height,
 		AABB triBB = getAABBForTriangle(triPos);
 
 #if DRAWPOINTS
+		// Since we only need to draw the points
+		// we can just set a color for each of the 
+		// points on the triangle. 
+		// For whatever reason, I couldn't set the color during render()
 		for (int i = 0; i < 3; i++) {
 			int x = triPos[i].x;
 			int y = triPos[i].y;
 
 			int index = x + (y * width);
 			dev_fragmentBuffer[index].color = glm::vec3(0.f, 1.f, 1.f);
+		}
+#elif DRAWLINES
+		int x1 = triPos[0].x;
+		int x2 = triPos[1].x;
+		int x3 = triPos[2].x;
+		int y1 = triPos[0].y;
+		int y2 = triPos[1].y;
+		int y3 = triPos[2].y;
+		
+		int dx21 = x2 - x1;
+		int dy21 = y2 - y1;
+		float m21 = dy21 / dx21;
+
+		int dx32 = x3 - x2;
+		int dy32 = y3 - y2;
+		float m32 = dy32 / dx32;
+
+		int dx13 = x3 - x1;
+		int dy13 = y3 - y1;
+		float m13 = dy13 / dx13;
+
+		for (int x = x1; x <= x2; x++) {
+			int y = y1 + (int)m21 * (x - x1);
+
+			int index = x + (y * width);
+			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
+		}
+
+		for (int x = x2; x <= x3; x++) {
+			int y = y2 + (int)m32 * (x - x2);
+
+			int index = x + (y * width);
+			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
+		}
+
+		for (int x = x1; x <= x3; x++) {
+			int y = y1 + (int)m13 * (x - x1);
+
+			int index = x + (y * width);
+			dev_fragmentBuffer[index].color = glm::vec3(1.f, 0.f, 0.f);
 		}
 #else 
 		for (int i = triBB.min.x; i < triBB.max.x; i++) {
