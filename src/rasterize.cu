@@ -21,10 +21,15 @@
 #include <thrust/random.h>
 #include <thrust/remove.h>
 #include <thrust/partition.h>
+#include "../stream_compaction/common.h"
 
-#define BACKFACE_CULLING 1
+#define BACKFACE_CULLING 0
 #define DRAWLINES 0
 #define DRAWPOINTS 0
+#define TEXTURE 1
+#define BILINEAR 1
+#define PERPSECTIVE_CORRECT 1
+#define MUTEX 1
 
 namespace {
 
@@ -165,25 +170,19 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 			return;
 		}
 
-
 		// Use Lambert
-		if (fragmentBuffer[index].dev_diffuseTex == NULL) {
+		if (fragmentBuffer[index].dev_diffuseTex == NULL || !TEXTURE) {
 			glm::vec3 lightWi = glm::normalize(fragmentBuffer[index].eyePos - lightPos);
 
 			float absDot = glm::abs(glm::dot(fragmentBuffer[index].eyeNor, lightWi));
 			glm::vec3 col = fragmentBuffer[index].color * intensity * absDot;
 
 			framebuffer[index] = glm::clamp(col, 0.f, 1.f);
-
-			//framebuffer[index] = fragmentBuffer[index].color;
-			//framebuffer[index] = glm::clamp(col, 0.f, 1.f);
-			//framebuffer[index] = col;
 		}
 		// Use texture
-		else {
+		else if(TEXTURE) {
 			glm::vec3 color(0.f);
 
-#define BILINEAR true
 			if (BILINEAR) {
 				// Bilinear
 				TextureData* tex = fragmentBuffer[index].dev_diffuseTex;
@@ -923,10 +922,11 @@ void _rasterize(int numPrims, int width, int height,
 					int index = i + (j * width);
 					
 					bool isLocked = false;
+#if MUTEX
 					do
 					{
 						isLocked = (atomicCAS(&dev_mutex[index], 0, 1) == 0);
-
+#endif		// end mutex
 						// Get the z coordinate and scale by some factor
 						int depth = getZAtCoordinate(p, triPos) * INT_MAX;
 
@@ -936,7 +936,7 @@ void _rasterize(int numPrims, int width, int height,
 						// Need to check if the the current depth is the closest one
 						if (dev_depth[index] == depth) {
 							// Color point if in bounds
-							dev_fragmentBuffer[index].color = glm::vec3(0, 1, 0);
+							dev_fragmentBuffer[index].color = glm::vec3(1.f);
 							dev_fragmentBuffer[index].eyePos = triEyePos[0] * p.x + triEyePos[1] * p.y + triEyePos[2] * p.z;
 							dev_fragmentBuffer[index].eyeNor = triEyeNor[0] * p.x + triEyeNor[1] * p.y + triEyeNor[2] * p.z;
 
@@ -944,26 +944,30 @@ void _rasterize(int numPrims, int width, int height,
 							dev_fragmentBuffer[index].dev_diffuseTex = prim.v[0].dev_diffuseTex;
 							dev_fragmentBuffer[index].diffuseTexWidth = prim.v[0].texWidth;
 							dev_fragmentBuffer[index].diffuseTexHeight = prim.v[0].texHeight;
+							dev_fragmentBuffer[index].texcoord0 = p.x * prim.v[0].texcoord0 + p.y * prim.v[1].texcoord0 + p.z * prim.v[2].texcoord0;
 
-							// Perspective Correct Texture Coordinate
-							// Divide all attributes (in this case barycentric) by eye space z
-							// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
-							glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
+							if (PERPSECTIVE_CORRECT) {
+								// Perspective Correct Texture Coordinate
+								// Divide all attributes (in this case barycentric) by eye space z
+								// https://www.scratchapixel.com/lessons/3d-basic-rendering/rasterization-practical-implementation/perspective-correct-interpolation-vertex-attributes
+								glm::vec3 w(p.x / triEyePos[0].z, p.y / triEyePos[1].z, p.z / triEyePos[2].z);
 
-							float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
-							float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
+								float s = w.x * prim.v[0].texcoord0.x + w.y * prim.v[1].texcoord0.x + w.z * prim.v[2].texcoord0.x;
+								float t = w.x * prim.v[0].texcoord0.y + w.y * prim.v[1].texcoord0.y + w.z * prim.v[2].texcoord0.y;
 
-							float z = 1.f / (w.x + w.y + w.z);
-							s *= z;
-							t *= z;
+								float z = 1.f / (w.x + w.y + w.z);
+								s *= z;
+								t *= z;
 
-							dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
+								dev_fragmentBuffer[index].texcoord0 = glm::vec2(s, t);
+							}
 						}
-
-						if (isLocked) {
+#if MUTEX
+						if (isLocked && MUTEX) {
 							dev_mutex[index] = 0;
 						}
 					} while (!isLocked);
+#endif		// end mutex
 				}
 			}
 		}
@@ -977,6 +981,11 @@ void _rasterize(int numPrims, int width, int height,
  * Perform rasterization.
  */
 void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const glm::mat3 MV_normal) {
+	StreamCompaction::Common::PerformanceTimer vertexTransformTimer;
+	StreamCompaction::Common::PerformanceTimer primitiveAssemblyTimer;
+	StreamCompaction::Common::PerformanceTimer rasterizationTimer;
+	StreamCompaction::Common::PerformanceTimer renderTimer;
+
     int sideLength2d = 8;
     dim3 blockSize2d(sideLength2d, sideLength2d);
     dim3 blockCount2d((width  - 1) / blockSize2d.x + 1,
@@ -993,6 +1002,9 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 		auto it = mesh2PrimitivesMap.begin();
 		auto itEnd = mesh2PrimitivesMap.end();
 
+		float vertTotal = 0.f;
+		float assembleTotal = 0.f;
+
 		for (; it != itEnd; ++it) {
 			auto p = (it->second).begin();	// each primitive
 			auto pEnd = (it->second).end();
@@ -1000,19 +1012,29 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 				dim3 numBlocksForVertices((p->numVertices + numThreadsPerBlock.x - 1) / numThreadsPerBlock.x);
 				dim3 numBlocksForIndices((p->numIndices + numThreadsPerBlock.x - 1) / numThreadsPerBlock.x);
 
+				vertexTransformTimer.startGpuTimer();
 				_vertexTransformAndAssembly << < numBlocksForVertices, numThreadsPerBlock >> >(p->numVertices, *p, MVP, MV, MV_normal, width, height);
+				vertexTransformTimer.endGpuTimer();
+				vertTotal += vertexTransformTimer.getGpuElapsedTimeForPreviousOperation();
 				checkCUDAError("Vertex Processing");
 				cudaDeviceSynchronize();
+				
+				primitiveAssemblyTimer.startGpuTimer();
 				_primitiveAssembly << < numBlocksForIndices, numThreadsPerBlock >> >
 					(p->numIndices, 
 					curPrimitiveBeginId, 
 					dev_primitives, 
 					*p);
+				primitiveAssemblyTimer.endGpuTimer();
+				assembleTotal += primitiveAssemblyTimer.getGpuElapsedTimeForPreviousOperation();
 				checkCUDAError("Primitive Assembly");
 
 				curPrimitiveBeginId += p->numPrimitives;
 			}
 		}
+		
+		printf("Vertex Transformation: %f\n", vertexTransformTimer.getGpuElapsedTimeForPreviousOperation());
+		printf("Primitive Assembly: %f\n", primitiveAssemblyTimer.getGpuElapsedTimeForPreviousOperation());
 
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
@@ -1025,13 +1047,22 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	{
 		dim3 numThreadsPerBlock(128);
 		dim3 numBlocksForPrims((totalNumPrimitives + numThreadsPerBlock.x - 1) / numThreadsPerBlock.x);
+
+		rasterizationTimer.startGpuTimer();
 		_rasterize << < numBlocksForPrims, numThreadsPerBlock >> > (totalNumPrimitives, width, height, dev_primitives, dev_fragmentBuffer, dev_depth, dev_mutex);
+		rasterizationTimer.endGpuTimer();
+		printf("Rasterization: %f\n", rasterizationTimer.getGpuElapsedTimeForPreviousOperation());
+		
 		checkCUDAError("rasterization");
 	}
 	
 
     // Copy depthbuffer colors into framebuffer
+	renderTimer.startGpuTimer();
 	render << <blockCount2d, blockSize2d >> >(width, height, dev_fragmentBuffer, dev_framebuffer);
+	renderTimer.endGpuTimer();
+	printf("Render: %f\n", renderTimer.getGpuElapsedTimeForPreviousOperation());
+
 	checkCUDAError("fragment shader");
     // Copy framebuffer into OpenGL buffer for OpenGL previewing
     sendImageToPBO<<<blockCount2d, blockSize2d>>>(pbo, width, height, dev_framebuffer);
