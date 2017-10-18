@@ -10,7 +10,7 @@ CUDA Rasterizer
 
 In this project, I was able to implement a basic graphics pipeline in CUDA including the *Vertex Shading*, *Primitive Assembly*, *Rasterization*, and *Fragment Shading* stages.
 
-![](renders/milktruck.png)
+![](renders/milktruck.PNG)
 
 ## Features
 * UV Texture Mapping with Bilinear Filtering and Perspective Correct Coordinates
@@ -31,7 +31,7 @@ In this project, I was able to implement a basic graphics pipeline in CUDA inclu
 ### Duck
 Textured  |  Triangles    |   Lines     | Points
 :-------------------------:|:-------------------------:|:-------------------------:|:-------------------------:
-![](renders/duck_tri.png) | ![](renders/duck_diff.png) | ![](renders/duck_line.png) | ![](renders/duck_point.png) | 
+![](renders/duck_tri.PNG) | ![](renders/duck_diff.PNG) | ![](renders/duck_line.PNG) | ![](renders/duck_point.PNG) | 
 
 ### Cesium Milk Truck
 Textured  |  Triangles    |   Lines     | Points
@@ -67,11 +67,11 @@ Having the mutex lock causes a slight overhead across the texture methods which 
 
 ![](images/milktruck_pipeline.png)
 
-![](images/pipeline.png)
+![](images/pipeline.PNG)
 
 ![](images/rasterization_types.png)
 
-![](images/rastertype.png)
+![](images/rastertype.PNG)
 
 ![](images/line_point.png)
 
